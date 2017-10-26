@@ -3,7 +3,6 @@ package idling
 import (
 	"crypto/tls"
 	"crypto/x509"
-	"errors"
 	"fmt"
 	"time"
 
@@ -18,6 +17,8 @@ import (
 	"k8s.io/kubernetes/pkg/util/wait"
 	"k8s.io/kubernetes/pkg/util/workqueue"
 )
+
+const MaxRetries = 2
 
 // IdlerConfig is the configuration for the hawkular client and idler.
 type IdlerConfig struct {
@@ -36,10 +37,10 @@ type IdlerConfig struct {
 }
 
 type Idler struct {
-	factory   *clientcmd.Factory
-	config    *IdlerConfig
-	resources *cache.Cache
-	queue     workqueue.RateLimitingInterface
+	factory     *clientcmd.Factory
+	config      *IdlerConfig
+	resources   *cache.Cache
+	queue       workqueue.RateLimitingInterface
 	stopChannel <-chan struct{}
 }
 
@@ -88,9 +89,15 @@ func (idler *Idler) startWorker() func() {
 		}
 		defer idler.queue.Done(ns)
 		if err := idler.syncProject(ns.(string)); err != nil {
-			glog.Errorf("Error( %s ), requeuing: %v", ns.(string), err)
-			idler.queue.AddRateLimited(ns)
-			return false
+			if idler.queue.NumRequeues(ns) > MaxRetries {
+				glog.V(2).Infof("Auto-idler: Unable to sync( %s ), no more retries left", ns.(string))
+				idler.queue.Forget(ns)
+				return false
+			} else {
+				glog.V(2).Infof("Auto-idler: Unable to fully sync( %s ), requeuing: %v", ns.(string), err)
+				idler.queue.AddRateLimited(ns)
+				return false
+			}
 		} else {
 			idler.queue.Forget(ns)
 			return false
@@ -99,7 +106,7 @@ func (idler *Idler) startWorker() func() {
 	return func() {
 		for {
 			if quit := workFunc(); quit {
-				glog.V(2).Infof("Auto-idler: worker shutting down")
+				glog.V(2).Infof("Auto-idler: Worker shutting down")
 				return
 			}
 		}
@@ -113,7 +120,7 @@ func (idler *Idler) syncProject(namespace string) error {
 	}
 	project, err := idler.resources.GetProject(namespace)
 	if err != nil {
-		return errors.New(fmt.Sprintf("%s", err))
+		return err
 	}
 	if project.IsAsleep {
 		glog.V(2).Infof("Auto-idler: Ignoring project( %s ), currently in force-sleep", namespace)
@@ -124,7 +131,7 @@ func (idler *Idler) syncProject(namespace string) error {
 	// Project is not currently idled if there are any running scalable pods in namespace.
 	idled, err := CheckIdledState(idler.resources, namespace, project.IsAsleep)
 	if err != nil {
-		return errors.New(fmt.Sprintf("%s", err))
+		return err
 	}
 	if idled {
 		glog.V(2).Infof("Auto-idler: Project( %s )sync complete", namespace)
@@ -132,7 +139,7 @@ func (idler *Idler) syncProject(namespace string) error {
 	}
 	services, err := idler.resources.GetProjectServices(namespace)
 	if err != nil {
-		return errors.New(fmt.Sprintf("%s", err))
+		return err
 	}
 	if len(services) == 0 {
 		glog.V(2).Infof("Auto-idler: Project( %s )has no services, exiting", namespace)
@@ -141,7 +148,7 @@ func (idler *Idler) syncProject(namespace string) error {
 	// Get project again here, to catch any changes to 'IsAsleep' status
 	project, err = idler.resources.GetProject(namespace)
 	if err != nil {
-		return errors.New(fmt.Sprintf("%s", err))
+		return err
 	}
 	if project.IsAsleep {
 		glog.V(2).Infof("Auto-idler: Ignoring project( %s ), currently in force-sleep", namespace)
@@ -150,7 +157,7 @@ func (idler *Idler) syncProject(namespace string) error {
 	glog.V(2).Infof("Auto-idler: Syncing project: %s ", project.Name)
 	projPods, err := idler.resources.GetProjectPods(namespace)
 	if err != nil {
-		return errors.New(fmt.Sprintf("%s", err))
+		return err
 	}
 	for _, pod := range projPods {
 		// Skip the project sync if any pod in the project has not been running for a complete idling cycle, or if controller hasn't been running
@@ -162,7 +169,7 @@ func (idler *Idler) syncProject(namespace string) error {
 		}
 	}
 	if err := idler.idleIfInactive(namespace); err != nil {
-		return errors.New(fmt.Sprintf("%s", err))
+		return err
 	}
 	glog.V(2).Infof("Auto-idler: Project( %s )sync complete", namespace)
 	return nil
@@ -171,7 +178,7 @@ func (idler *Idler) syncProject(namespace string) error {
 func (idler *Idler) idleIfInactive(namespace string) error {
 	project, err := idler.resources.GetProject(namespace)
 	if err != nil {
-		return errors.New(fmt.Sprintf("%s", err))
+		return err
 	}
 	// Extra check here, not sure it's necessary
 	if project.IsAsleep {
@@ -180,11 +187,11 @@ func (idler *Idler) idleIfInactive(namespace string) error {
 	}
 	svcs, err := idler.resources.GetProjectServices(namespace)
 	if err != nil {
-		return errors.New(fmt.Sprintf("%s", err))
+		return err
 	}
 	projectPods, err := idler.resources.GetProjectPods(namespace)
 	if err != nil {
-		return errors.New(fmt.Sprintf("%s", err))
+		return err
 	}
 	var scalablePods []interface{}
 	for _, svc := range svcs {
@@ -228,11 +235,11 @@ func (idler *Idler) idleIfInactive(namespace string) error {
 
 	c, err := metrics.NewHawkularClient(p)
 	if err != nil {
-		return errors.New(fmt.Sprintf("Auto-idler: %s", err))
+		return err
 	}
 	bp, err := c.ReadBuckets(metrics.Counter, filters...)
 	if err != nil {
-		return errors.New(fmt.Sprintf("Auto-idler: %s", err))
+		return err
 	}
 
 	for _, value := range bp {
@@ -246,7 +253,7 @@ func (idler *Idler) idleIfInactive(namespace string) error {
 				glog.V(2).Infof("Auto-idler: Project( %s )activity below idling threshold, idling....", namespace)
 				err := idler.autoIdleProjectServices(namespace)
 				if err != nil {
-					return errors.New(fmt.Sprintf("Auto-idler: %s", err))
+					return err
 				}
 			} else {
 				glog.V(2).Infof("Auto-idler: Project( %s )network activity below idling threshold, but currently in DryRun mode.", namespace)
@@ -300,12 +307,12 @@ func CheckIdledState(c *cache.Cache, namespace string, IsAsleep bool) (bool, err
 	idled := false
 	svcs, err := c.GetProjectServices(namespace)
 	if err != nil {
-		return idled, errors.New(fmt.Sprintf("Auto-idler: %s", err))
+		return idled, err
 	}
 	var runningPods []interface{}
 	projPods, err := c.GetProjectPods(namespace)
 	if err != nil {
-		return idled, errors.New(fmt.Sprintf("Auto-idler: %s", err))
+		return idled, err
 	}
 	for _, p := range projPods {
 		if p.(*cache.ResourceObject).IsStarted() {
@@ -337,7 +344,7 @@ func CheckIdledState(c *cache.Cache, namespace string, IsAsleep bool) (bool, err
 	endpointInterface := c.KubeClient.Endpoints(namespace)
 	epList, err := endpointInterface.List(kapi.ListOptions{})
 	if err != nil {
-		return idled, errors.New(fmt.Sprintf("Auto-idler: %s", err))
+		return idled, err
 	}
 	for _, ep := range epList.Items {
 		_, idledAtExists := ep.ObjectMeta.Annotations[unidlingapi.IdledAtAnnotation]
@@ -379,28 +386,28 @@ func (idler *Idler) autoIdleProjectServices(namespace string) error {
 	glog.V(0).Infof("Auto-idler: Adding previous scale annotation in project( %s )", namespace)
 	err = AddProjectPreviousScaleAnnotation(idler.resources, namespace)
 	if err != nil {
-		return errors.New(fmt.Sprintf("Error adding project( %s )previous scale annotation: %s", namespace, err))
+		return fmt.Errorf("Error adding project( %s )previous scale annotation: %s", namespace, err)
 	}
 	glog.V(2).Infof("Auto-idler: Scaling DCs in project %s", namespace)
 	err = ScaleProjectDCs(idler.resources, namespace)
 	if err != nil {
-		return errors.New(fmt.Sprintf("Error scaling DCs in project %s: %s", namespace, err))
+		return fmt.Errorf("Error scaling DCs in project %s: %s", namespace, err)
 	}
 
 	glog.V(2).Infof("Auto-idler: Scaling RCs in project %s", namespace)
 	err = ScaleProjectRCs(idler.resources, namespace)
 	if err != nil {
-		return errors.New(fmt.Sprintf("Error scaling RCs in project %s: %s", namespace, err))
+		return fmt.Errorf("Error scaling RCs in project %s: %s", namespace, err)
 	}
 	glog.V(2).Infof("Auto-idler: Deleting pods in project %s", namespace)
 	err = DeleteProjectPods(idler.resources, namespace)
 	if err != nil {
-		return errors.New(fmt.Sprintf("Error deleting pods in project %s: %s", namespace, err))
+		return fmt.Errorf("Error deleting pods in project %s: %s", namespace, err)
 	}
 	glog.V(0).Infof("Auto-idler: Adding idled-at annotation in project( %s )", namespace)
 	err = AddProjectIdledAtAnnotation(idler.resources, namespace, nowTime, idler.config.ProjectSleepPeriod)
 	if err != nil {
-		return errors.New(fmt.Sprintf("Error adding idled-at annotation in project( %s ): %v", namespace, err))
+		return fmt.Errorf("Error adding idled-at annotation in project( %s ): %v", namespace, err)
 	}
 	return nil
 }
