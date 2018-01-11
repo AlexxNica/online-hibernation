@@ -7,21 +7,20 @@ import (
 	"testing"
 	"time"
 
+	fakeoclientset "github.com/openshift/client-go/apps/clientset/versioned/fake"
 	"github.com/openshift/online-hibernation/pkg/cache"
 
-	"github.com/openshift/origin/pkg/client/testclient"
-	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
-	deployapi "github.com/openshift/origin/pkg/deploy/api"
+	appsv1 "github.com/openshift/api/apps/v1"
 
-	"github.com/spf13/pflag"
-
-	kapi "k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/meta"
-	"k8s.io/kubernetes/pkg/api/resource"
-	"k8s.io/kubernetes/pkg/api/unversioned"
-	ktestclient "k8s.io/kubernetes/pkg/client/unversioned/testclient"
-	"k8s.io/kubernetes/pkg/runtime"
-	"k8s.io/kubernetes/pkg/types"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	fakekclientset "k8s.io/client-go/kubernetes/fake"
+	restclient "k8s.io/client-go/rest"
+	ktesting "k8s.io/client-go/testing"
 )
 
 type action struct {
@@ -42,11 +41,11 @@ func TestSyncProject(t *testing.T) {
 		ProjectSleepPeriod       string
 		TermQuota                string
 		NonTermQuota             string
-		Projects                 []string
-		DeploymentConfigs        []*deployapi.DeploymentConfig
-		Pods                     []*kapi.Pod
-		ReplicationControllers   []*kapi.ReplicationController
-		ResourceQuotas           []*kapi.ResourceQuota
+		Projects                 []*corev1.Namespace
+		DeploymentConfigs        []*appsv1.DeploymentConfig
+		Pods                     []*corev1.Pod
+		ReplicationControllers   []*corev1.ReplicationController
+		ResourceQuotas           []*corev1.ResourceQuota
 		Resources                []*cache.ResourceObject
 		ExpectedOpenshiftActions []action
 		ExpectedKubeActions      []action
@@ -58,17 +57,17 @@ func TestSyncProject(t *testing.T) {
 			TermQuota:          "1G",
 			NonTermQuota:       "1G",
 			DryRun:             false,
-			Projects:           []string{"test"},
-			ResourceQuotas: []*kapi.ResourceQuota{
-				quota("compute-resources", "test", "1G", "1"),
+			ResourceQuotas:     []*corev1.ResourceQuota{},
+			Projects: []*corev1.Namespace{
+				project("test"),
 			},
-			Pods: []*kapi.Pod{
+			Pods: []*corev1.Pod{
 				pod("pod1", "test"),
 			},
-			ReplicationControllers: []*kapi.ReplicationController{
+			ReplicationControllers: []*corev1.ReplicationController{
 				rc("rc1", "test"),
 			},
-			DeploymentConfigs: []*deployapi.DeploymentConfig{
+			DeploymentConfigs: []*appsv1.DeploymentConfig{
 				dc("dc1", "test"),
 			},
 			Resources: []*cache.ResourceObject{
@@ -83,7 +82,7 @@ func TestSyncProject(t *testing.T) {
 					}),
 			},
 			ExpectedOpenshiftActions: []action{
-				{Verb: "update", Resource: "deploymentconfigs"},
+				{Verb: "list", Resource: "deploymentconfigs"},
 			},
 			ExpectedKubeActions: []action{
 				{Verb: "get", Resource: "namespaces", Name: "test"},
@@ -102,17 +101,17 @@ func TestSyncProject(t *testing.T) {
 			TermQuota:          "1G",
 			NonTermQuota:       "1G",
 			DryRun:             true,
-			Projects:           []string{"test"},
-			ResourceQuotas: []*kapi.ResourceQuota{
-				quota("compute-resources", "test", "1G", "1"),
+			ResourceQuotas:     []*corev1.ResourceQuota{},
+			Projects: []*corev1.Namespace{
+				project("test"),
 			},
-			Pods: []*kapi.Pod{
+			Pods: []*corev1.Pod{
 				pod("pod1", "test"),
 			},
-			ReplicationControllers: []*kapi.ReplicationController{
+			ReplicationControllers: []*corev1.ReplicationController{
 				rc("rc1", "test"),
 			},
-			DeploymentConfigs: []*deployapi.DeploymentConfig{
+			DeploymentConfigs: []*appsv1.DeploymentConfig{
 				dc("dc1", "test"),
 			},
 			Resources: []*cache.ResourceObject{
@@ -137,17 +136,17 @@ func TestSyncProject(t *testing.T) {
 			TermQuota:          "1G",
 			NonTermQuota:       "1G",
 			DryRun:             true,
-			Projects:           []string{"test"},
-			ResourceQuotas: []*kapi.ResourceQuota{
-				quota("compute-resources", "test", "1G", "1"),
+			ResourceQuotas:     []*corev1.ResourceQuota{},
+			Projects: []*corev1.Namespace{
+				project("test"),
 			},
-			Pods: []*kapi.Pod{
+			Pods: []*corev1.Pod{
 				pod("pod1", "test"),
 			},
-			ReplicationControllers: []*kapi.ReplicationController{
+			ReplicationControllers: []*corev1.ReplicationController{
 				rc("rc1", "test"),
 			},
-			DeploymentConfigs: []*deployapi.DeploymentConfig{
+			DeploymentConfigs: []*appsv1.DeploymentConfig{
 				dc("dc1", "test"),
 			},
 			Resources: []*cache.ResourceObject{
@@ -172,16 +171,17 @@ func TestSyncProject(t *testing.T) {
 			TermQuota:          "1G",
 			NonTermQuota:       "1G",
 			DryRun:             false,
-			Projects:           []string{"test"},
-			ResourceQuotas: []*kapi.ResourceQuota{
-				quota("compute-resources", "test", "1G", "1"),
+			ResourceQuotas: []*corev1.ResourceQuota{
 				quota("force-sleep", "test", "1G", "0"),
 			},
-			Pods: []*kapi.Pod{},
-			ReplicationControllers: []*kapi.ReplicationController{
+			Projects: []*corev1.Namespace{
+				project("test"),
+			},
+			Pods: []*corev1.Pod{},
+			ReplicationControllers: []*corev1.ReplicationController{
 				rc("rc1", "test"),
 			},
-			DeploymentConfigs: []*deployapi.DeploymentConfig{
+			DeploymentConfigs: []*appsv1.DeploymentConfig{
 				dc("dc1", "test"),
 			},
 			Resources: []*cache.ResourceObject{
@@ -205,16 +205,17 @@ func TestSyncProject(t *testing.T) {
 			TermQuota:          "1G",
 			NonTermQuota:       "1G",
 			DryRun:             false,
-			Projects:           []string{"test"},
-			ResourceQuotas: []*kapi.ResourceQuota{
-				quota("compute-resources", "test", "1G", "1"),
+			ResourceQuotas: []*corev1.ResourceQuota{
 				quota("force-sleep", "test", "1G", "0"),
 			},
-			Pods: []*kapi.Pod{},
-			ReplicationControllers: []*kapi.ReplicationController{
+			Projects: []*corev1.Namespace{
+				project("test"),
+			},
+			Pods: []*corev1.Pod{},
+			ReplicationControllers: []*corev1.ReplicationController{
 				rc("rc1", "test"),
 			},
-			DeploymentConfigs: []*deployapi.DeploymentConfig{
+			DeploymentConfigs: []*appsv1.DeploymentConfig{
 				dc("dc1", "test"),
 			},
 			Resources: []*cache.ResourceObject{
@@ -225,7 +226,7 @@ func TestSyncProject(t *testing.T) {
 				}),
 			},
 			ExpectedOpenshiftActions: []action{
-				{Verb: "update", Resource: "deploymentconfigs"},
+				{Verb: "list", Resource: "deploymentconfigs"},
 			},
 			ExpectedKubeActions: []action{
 				{Verb: "get", Resource: "namespaces", Name: "test"},
@@ -242,18 +243,18 @@ func TestSyncProject(t *testing.T) {
 			TermQuota:          "1G",
 			NonTermQuota:       "1G",
 			DryRun:             false,
-			Projects:           []string{"test"},
-			ResourceQuotas: []*kapi.ResourceQuota{
-				quota("compute-resources", "test", "1G", "2"),
+			ResourceQuotas:     []*corev1.ResourceQuota{},
+			Projects: []*corev1.Namespace{
+				project("test"),
 			},
-			Pods: []*kapi.Pod{
+			Pods: []*corev1.Pod{
 				pod("pod1", "test"),
 				pod("pod2", "test"),
 			},
-			ReplicationControllers: []*kapi.ReplicationController{
+			ReplicationControllers: []*corev1.ReplicationController{
 				rc("rc1", "test"),
 			},
-			DeploymentConfigs: []*deployapi.DeploymentConfig{
+			DeploymentConfigs: []*appsv1.DeploymentConfig{
 				dc("dc1", "test"),
 			},
 			Resources: []*cache.ResourceObject{
@@ -274,7 +275,7 @@ func TestSyncProject(t *testing.T) {
 					}),
 			},
 			ExpectedOpenshiftActions: []action{
-				{Verb: "update", Resource: "deploymentconfigs"},
+				{Verb: "list", Resource: "deploymentconfigs"},
 			},
 			ExpectedKubeActions: []action{
 				{Verb: "get", Resource: "namespaces", Name: "test"},
@@ -295,17 +296,17 @@ func TestSyncProject(t *testing.T) {
 			TermQuota:          "1G",
 			NonTermQuota:       "1G",
 			DryRun:             false,
-			Projects:           []string{"test"},
-			ResourceQuotas: []*kapi.ResourceQuota{
-				quota("compute-resources", "test", "1G", "2"),
+			ResourceQuotas:     []*corev1.ResourceQuota{},
+			Projects: []*corev1.Namespace{
+				project("test"),
 			},
-			Pods: []*kapi.Pod{
+			Pods: []*corev1.Pod{
 				pod("pod1", "test"),
 			},
-			ReplicationControllers: []*kapi.ReplicationController{
+			ReplicationControllers: []*corev1.ReplicationController{
 				rc("rc1", "test"),
 			},
-			DeploymentConfigs: []*deployapi.DeploymentConfig{
+			DeploymentConfigs: []*appsv1.DeploymentConfig{
 				dc("dc1", "test"),
 			},
 			Resources: []*cache.ResourceObject{
@@ -330,15 +331,12 @@ func TestSyncProject(t *testing.T) {
 			ProjectSleepPeriod: "8h",
 			TermQuota:          "1G",
 			NonTermQuota:       "1G",
-			Projects:           []string{"test"},
-			ResourceQuotas: []*kapi.ResourceQuota{
-				quota("compute-resources", "test", "1G", "2"),
-			},
-			Pods: []*kapi.Pod{},
-			ReplicationControllers: []*kapi.ReplicationController{
+			ResourceQuotas:     []*corev1.ResourceQuota{},
+			Pods:               []*corev1.Pod{},
+			ReplicationControllers: []*corev1.ReplicationController{
 				rc("rc1", "test"),
 			},
-			DeploymentConfigs: []*deployapi.DeploymentConfig{
+			DeploymentConfigs: []*appsv1.DeploymentConfig{
 				dc("dc1", "test"),
 			},
 			Resources: []*cache.ResourceObject{
@@ -359,17 +357,17 @@ func TestSyncProject(t *testing.T) {
 			TermQuota:          "1G",
 			NonTermQuota:       "1G",
 			DryRun:             false,
-			Projects:           []string{"test"},
-			ResourceQuotas: []*kapi.ResourceQuota{
-				quota("compute-resources", "test", "1G", "1"),
+			ResourceQuotas:     []*corev1.ResourceQuota{},
+			Projects: []*corev1.Namespace{
+				project("test"),
 			},
-			Pods: []*kapi.Pod{
+			Pods: []*corev1.Pod{
 				pod("pod1", "test"),
 			},
-			ReplicationControllers: []*kapi.ReplicationController{
+			ReplicationControllers: []*corev1.ReplicationController{
 				rc("rc1", "test"),
 			},
-			DeploymentConfigs: []*deployapi.DeploymentConfig{
+			DeploymentConfigs: []*appsv1.DeploymentConfig{
 				dc("dc1", "test"),
 			},
 			Resources: []*cache.ResourceObject{
@@ -379,15 +377,22 @@ func TestSyncProject(t *testing.T) {
 						time.Time{}),
 				}),
 				podResource("pod1", "pod1", "test", "1",
-					resource.MustParse("1M"),
+					resource.MustParse("1G"),
 					[]*cache.RunningTime{
 						runningTime(time.Now().Add(-16*time.Hour), time.Time{}),
 					}),
 			},
-			ExpectedOpenshiftActions: []action{},
-			ExpectedKubeActions:      []action{
-			//{Verb: "get", Resource: "replicationcontrollers"},
-			//{Verb: "get", Resource: "replicationcontrollers"},
+			ExpectedOpenshiftActions: []action{
+				{Verb: "list", Resource: "deploymentconfigs"},
+			},
+			ExpectedKubeActions: []action{
+				{Verb: "get", Resource: "namespaces", Name: "test"},
+				{Verb: "update", Resource: "namespaces", Name: "test"},
+				{Verb: "create", Resource: "resourcequotas", Name: "force-sleep"},
+				{Verb: "delete", Resource: "pods", Name: "pod1"},
+				{Verb: "list", Resource: "pods"},
+				{Verb: "list", Resource: "replicationcontrollers"},
+				{Verb: "update", Resource: "replicationcontrollers", Name: "rc1"},
 			},
 		},
 
@@ -398,19 +403,21 @@ func TestSyncProject(t *testing.T) {
 			TermQuota:          "1G",
 			NonTermQuota:       "1G",
 			DryRun:             false,
-			Projects:           []string{"test"},
-			ResourceQuotas: []*kapi.ResourceQuota{
+			ResourceQuotas: []*corev1.ResourceQuota{
 				quota("compute-resources", "test", "1G", "2"),
 			},
-			Pods: []*kapi.Pod{
+			Projects: []*corev1.Namespace{
+				project("test"),
+			},
+			Pods: []*corev1.Pod{
 				pod("pod1", "test"),
 				pod("pod2", "test"),
 			},
-			ReplicationControllers: []*kapi.ReplicationController{
+			ReplicationControllers: []*corev1.ReplicationController{
 				rc("rc1", "test"),
 				rc("rc2", "test"),
 			},
-			DeploymentConfigs: []*deployapi.DeploymentConfig{
+			DeploymentConfigs: []*appsv1.DeploymentConfig{
 				dc("dc1", "test"),
 			},
 			Resources: []*cache.ResourceObject{
@@ -424,16 +431,24 @@ func TestSyncProject(t *testing.T) {
 						time.Time{}),
 				}),
 				podResource("pod1", "pod1", "test", "1",
-					resource.MustParse("1M"),
+					resource.MustParse("1G"),
 					[]*cache.RunningTime{
 						runningTime(time.Now().Add(-16*time.Hour), time.Time{}),
 					}),
 			},
-			ExpectedOpenshiftActions: []action{},
-			ExpectedKubeActions:      []action{
-			//{Verb: "get", Resource: "replicationcontrollers", Name: "rc1"},
-			//{Verb: "get", Resource: "replicationcontrollers", Name: "rc2"},
-			//{Verb: "update", Resource: "replicationcontrollers"},
+			ExpectedOpenshiftActions: []action{
+				{Verb: "list", Resource: "deploymentconfigs"},
+			},
+			ExpectedKubeActions: []action{
+				{Verb: "get", Resource: "namespaces", Name: "test"},
+				{Verb: "list", Resource: "replicationcontrollers"},
+				{Verb: "create", Resource: "resourcequotas", Name: "force-sleep"},
+				{Verb: "delete", Resource: "pods", Name: "pod1"},
+				{Verb: "delete", Resource: "pods", Name: "pod2"},
+				{Verb: "list", Resource: "pods"},
+				{Verb: "update", Resource: "namespaces", Name: "test"},
+				{Verb: "update", Resource: "replicationcontrollers"},
+				{Verb: "update", Resource: "replicationcontrollers"},
 			},
 		},
 	}
@@ -454,6 +469,8 @@ func TestSyncProject(t *testing.T) {
 			t.Logf("Error: %s", err)
 		}
 
+		oc := fakeoclientset.NewSimpleClientset()
+		kc := &fakekclientset.Clientset{}
 		config := &SleeperConfig{
 			Quota:              quota,
 			Period:             period,
@@ -461,48 +478,53 @@ func TestSyncProject(t *testing.T) {
 			TermQuota:          resource.MustParse(test.TermQuota),
 			NonTermQuota:       resource.MustParse(test.NonTermQuota),
 			DryRun:             test.DryRun,
+			QuotaClient:        kc.CoreV1(),
 		}
-		kc := &ktestclient.Fake{}
-		kc.AddReactor("list", "resourcequotas", func(action ktestclient.Action) (handled bool, ret runtime.Object, err error) {
-			list := &kapi.ResourceQuotaList{}
+		kc.AddReactor("list", "namespaces", func(action ktesting.Action) (handled bool, ret runtime.Object, err error) {
+			list := &corev1.NamespaceList{}
+			for i := range test.Projects {
+				list.Items = append(list.Items, *test.Projects[i])
+			}
+			return true, list, nil
+		})
+		kc.AddReactor("list", "resourcequotas", func(action ktesting.Action) (handled bool, ret runtime.Object, err error) {
+			list := &corev1.ResourceQuotaList{}
 			for i := range test.ResourceQuotas {
 				list.Items = append(list.Items, *test.ResourceQuotas[i])
 			}
 			return true, list, nil
 		})
-		kc.AddReactor("get", "resourcequotas", func(action ktestclient.Action) (handled bool, ret runtime.Object, err error) {
+		kc.AddReactor("get", "resourcequotas", func(action ktesting.Action) (handled bool, ret runtime.Object, err error) {
 			for i := range test.ResourceQuotas {
-				if test.ResourceQuotas[i].Name == action.(ktestclient.GetAction).GetName() {
+				if test.ResourceQuotas[i].Name == action.(ktesting.GetAction).GetName() {
 					return true, test.ResourceQuotas[i], nil
 				}
 			}
 			return true, nil, nil
 		})
-		kc.AddReactor("list", "pods", func(action ktestclient.Action) (handled bool, ret runtime.Object, err error) {
-			list := &kapi.PodList{}
+		kc.AddReactor("list", "pods", func(action ktesting.Action) (handled bool, ret runtime.Object, err error) {
+			list := &corev1.PodList{}
 			for i := range test.Pods {
 				list.Items = append(list.Items, *test.Pods[i])
 			}
 			return true, list, nil
 		})
-		kc.AddReactor("list", "replicationcontrollers", func(action ktestclient.Action) (handled bool, ret runtime.Object, err error) {
-			list := &kapi.ReplicationControllerList{}
+		kc.AddReactor("list", "replicationcontrollers", func(action ktesting.Action) (handled bool, ret runtime.Object, err error) {
+			list := &corev1.ReplicationControllerList{}
 			for i := range test.ReplicationControllers {
 				list.Items = append(list.Items, *test.ReplicationControllers[i])
 			}
 			return true, list, nil
 		})
 
-		oc := &testclient.Fake{}
-		oc.AddReactor("list", "deploymentconfigs", func(action ktestclient.Action) (handled bool, ret runtime.Object, err error) {
-			list := &deployapi.DeploymentConfigList{}
+		oc.AddReactor("list", "deploymentconfigs", func(action ktesting.Action) (handled bool, ret runtime.Object, err error) {
+			list := &appsv1.DeploymentConfigList{}
 			for i := range test.DeploymentConfigs {
 				list.Items = append(list.Items, *test.DeploymentConfigs[i])
 			}
 			return true, list, nil
 		})
 
-		f := clientcmd.New(pflag.NewFlagSet("empty", pflag.ContinueOnError))
 		excludeNamespaces := "default,logging,kube-system,openshift-infra"
 		namespaces := strings.Split(excludeNamespaces, ",")
 		exclude := make(map[string]bool)
@@ -510,32 +532,40 @@ func TestSyncProject(t *testing.T) {
 			exclude[name] = true
 		}
 
-		rcache := cache.NewCache(oc, kc, f, exclude)
-		s := NewSleeper(config, f, rcache)
+		clientConfig := &restclient.Config{
+			Host: "127.0.0.1",
+			ContentConfig: restclient.ContentConfig{GroupVersion: &corev1.SchemeGroupVersion,
+				NegotiatedSerializer: cache.Codecs},
+		}
+
+		rcache := cache.NewCache(oc, kc, clientConfig, nil, exclude)
+		s := NewSleeper(config, rcache)
 
 		for _, resource := range test.Resources {
 			err := s.resources.Indexer.AddResourceObject(resource)
 			if err != nil {
 				t.Logf("Error: %s", err)
 			}
-
 		}
-
-		for _, project := range test.Projects {
-			s.syncProject(project)
+		projects, err := s.resources.Indexer.ByIndex("ofKind", cache.ProjectKind)
+		if err != nil {
+			t.Logf("Error: %s", err)
+		}
+		for _, project := range projects {
+			s.syncProject(project.(*cache.ResourceObject).Name)
 		}
 
 		// Test kubeClient actions
 		for _, action := range kc.Actions() {
 			switch a := action.(type) {
-			case ktestclient.ListActionImpl:
-			case ktestclient.UpdateActionImpl:
+			case ktesting.ListActionImpl:
+			case ktesting.UpdateActionImpl:
 				found := false
 				for _, e := range test.ExpectedKubeActions {
 					if e.Verb != a.GetVerb() {
 						continue
 					}
-					if e.Resource == a.GetResource() {
+					if e.Resource == a.GetResource().Resource {
 						found = true
 						break
 					}
@@ -544,14 +574,14 @@ func TestSyncProject(t *testing.T) {
 					t.Fatalf("unexpected action: %#v", action)
 				}
 
-			case ktestclient.CreateActionImpl:
+			case ktesting.CreateActionImpl:
 				accessor, _ := meta.Accessor(a.GetObject())
 				found := false
 				for _, e := range test.ExpectedKubeActions {
 					if e.Verb != a.GetVerb() {
 						continue
 					}
-					if e.Resource == a.GetResource() && e.Name == accessor.GetName() {
+					if e.Resource == a.GetResource().Resource && e.Name == accessor.GetName() {
 						found = true
 						break
 					}
@@ -560,13 +590,13 @@ func TestSyncProject(t *testing.T) {
 					t.Fatalf("unexpected action (name=%s): %#v", accessor.GetName(), action)
 				}
 
-			case ktestclient.DeleteActionImpl:
+			case ktesting.DeleteActionImpl:
 				found := false
 				for _, e := range test.ExpectedKubeActions {
 					if e.Verb != a.GetVerb() {
 						continue
 					}
-					if e.Resource == a.GetResource() && e.Name == a.GetName() {
+					if e.Resource == a.GetResource().Resource && e.Name == a.GetName() {
 						found = true
 						break
 					}
@@ -575,13 +605,13 @@ func TestSyncProject(t *testing.T) {
 					t.Fatalf("unexpected action (name=%s): %#v", a.GetName(), action)
 				}
 
-			case ktestclient.GetActionImpl:
+			case ktesting.GetActionImpl:
 				found := false
 				for _, e := range test.ExpectedKubeActions {
 					if e.Verb != a.GetVerb() {
 						continue
 					}
-					if e.Resource == a.GetResource() && e.Name == a.GetName() {
+					if e.Resource == a.GetResource().Resource && e.Name == a.GetName() {
 						found = true
 						break
 					}
@@ -598,14 +628,14 @@ func TestSyncProject(t *testing.T) {
 		// Test osClient actions
 		for _, action := range oc.Actions() {
 			switch a := action.(type) {
-			case ktestclient.ListActionImpl:
-			case ktestclient.UpdateActionImpl:
+			case ktesting.ListActionImpl:
+			case ktesting.UpdateActionImpl:
 				found := false
 				for _, e := range test.ExpectedOpenshiftActions {
 					if e.Verb != a.GetVerb() {
 						continue
 					}
-					if e.Resource == a.GetResource() {
+					if e.Resource == a.GetResource().Resource {
 						found = true
 						break
 					}
@@ -614,14 +644,14 @@ func TestSyncProject(t *testing.T) {
 					t.Fatalf("unexpected action: %#v", action)
 				}
 
-			case ktestclient.CreateActionImpl:
+			case ktesting.CreateActionImpl:
 				accessor, _ := meta.Accessor(a.GetObject())
 				found := false
 				for _, e := range test.ExpectedOpenshiftActions {
 					if e.Verb != a.GetVerb() {
 						continue
 					}
-					if e.Resource == a.GetResource() && e.Name == accessor.GetName() {
+					if e.Resource == a.GetResource().Resource && e.Name == accessor.GetName() {
 						found = true
 						break
 					}
@@ -630,13 +660,13 @@ func TestSyncProject(t *testing.T) {
 					t.Fatalf("unexpected action (name=%s): %#v", accessor.GetName(), action)
 				}
 
-			case ktestclient.DeleteActionImpl:
+			case ktesting.DeleteActionImpl:
 				found := false
 				for _, e := range test.ExpectedOpenshiftActions {
 					if e.Verb != a.GetVerb() {
 						continue
 					}
-					if e.Resource == a.GetResource() && e.Name == a.GetName() {
+					if e.Resource == a.GetResource().Resource && e.Name == a.GetName() {
 						found = true
 						break
 					}
@@ -645,13 +675,13 @@ func TestSyncProject(t *testing.T) {
 					t.Fatalf("unexpected action (name=%s): %#v", a.GetName(), action)
 				}
 
-			case ktestclient.GetActionImpl:
+			case ktesting.GetActionImpl:
 				found := false
 				for _, e := range test.ExpectedOpenshiftActions {
 					if e.Verb != a.GetVerb() {
 						continue
 					}
-					if e.Resource == a.GetResource() && e.Name == a.GetName() {
+					if e.Resource == a.GetResource().Resource && e.Name == a.GetName() {
 						found = true
 						break
 					}
@@ -672,28 +702,28 @@ func TestSyncProject(t *testing.T) {
 				if action.GetVerb() != e.Verb {
 					continue
 				}
-				if action.GetResource() != e.Resource {
+				if action.GetResource().Resource != e.Resource {
 					continue
 				}
 				switch a := action.(type) {
-				case ktestclient.ListActionImpl:
-					if e.Verb == action.GetVerb() && e.Resource == action.GetResource() {
+				case ktesting.ListActionImpl:
+					if e.Verb == action.GetVerb() && e.Resource == action.GetResource().Resource {
 						found = true
 					}
-				case ktestclient.UpdateActionImpl:
-					if e.Verb == action.GetVerb() && e.Resource == action.GetResource() {
+				case ktesting.UpdateActionImpl:
+					if e.Verb == action.GetVerb() && e.Resource == action.GetResource().Resource {
 						found = true
 					}
-				case ktestclient.CreateActionImpl:
+				case ktesting.CreateActionImpl:
 					accessor, _ := meta.Accessor(a.GetObject())
 					if e.Name == accessor.GetName() {
 						found = true
 					}
-				case ktestclient.GetActionImpl:
+				case ktesting.GetActionImpl:
 					if e.Name == a.GetName() {
 						found = true
 					}
-				case ktestclient.DeleteActionImpl:
+				case ktesting.DeleteActionImpl:
 					if e.Name == a.GetName() {
 						found = true
 					}
@@ -716,28 +746,28 @@ func TestSyncProject(t *testing.T) {
 				if action.GetVerb() != e.Verb {
 					continue
 				}
-				if action.GetResource() != e.Resource {
+				if action.GetResource().Resource != e.Resource {
 					continue
 				}
 				switch a := action.(type) {
-				case ktestclient.ListActionImpl:
-					if e.Verb == action.GetVerb() && e.Resource == action.GetResource() {
+				case ktesting.ListActionImpl:
+					if e.Verb == action.GetVerb() && e.Resource == action.GetResource().Resource {
 						found = true
 					}
-				case ktestclient.CreateActionImpl:
+				case ktesting.CreateActionImpl:
 					accessor, _ := meta.Accessor(a.GetObject())
 					if e.Name == accessor.GetName() {
 						found = true
 					}
-				case ktestclient.UpdateActionImpl:
-					if e.Verb == action.GetVerb() && e.Resource == action.GetResource() {
+				case ktesting.UpdateActionImpl:
+					if e.Verb == action.GetVerb() && e.Resource == action.GetResource().Resource {
 						found = true
 					}
-				case ktestclient.GetActionImpl:
+				case ktesting.GetActionImpl:
 					if e.Name == a.GetName() {
 						found = true
 					}
-				case ktestclient.DeleteActionImpl:
+				case ktesting.DeleteActionImpl:
 					if e.Name == a.GetName() {
 						found = true
 					}
@@ -756,55 +786,66 @@ func TestSyncProject(t *testing.T) {
 	}
 }
 
-func pod(name, namespace string) *kapi.Pod {
-	return &kapi.Pod{
-		TypeMeta: unversioned.TypeMeta{
+func project(name string) *corev1.Namespace {
+	return &corev1.Namespace{
+		TypeMeta: metav1.TypeMeta{
+			Kind: "Namespace",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name,
+		},
+	}
+}
+
+func pod(name, namespace string) *corev1.Pod {
+	return &corev1.Pod{
+		TypeMeta: metav1.TypeMeta{
 			Kind: "Pod",
 		},
-		ObjectMeta: kapi.ObjectMeta{
+		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: namespace,
 		},
 	}
 }
 
-func rc(name, namespace string) *kapi.ReplicationController {
-	return &kapi.ReplicationController{
-		TypeMeta: unversioned.TypeMeta{
+func rc(name, namespace string) *corev1.ReplicationController {
+	return &corev1.ReplicationController{
+		TypeMeta: metav1.TypeMeta{
 			Kind: "ReplicationController",
 		},
-		ObjectMeta: kapi.ObjectMeta{
+		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: namespace,
 		},
 	}
 }
 
-func dc(name, namespace string) *deployapi.DeploymentConfig {
-	return &deployapi.DeploymentConfig{
-		TypeMeta: unversioned.TypeMeta{
+func dc(name, namespace string) *appsv1.DeploymentConfig {
+	return &appsv1.DeploymentConfig{
+		TypeMeta: metav1.TypeMeta{
 			Kind: "ReplicationController",
 		},
-		ObjectMeta: kapi.ObjectMeta{
+		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: namespace,
 		},
 	}
 }
 
-func quota(name, namespace, memory, pods string) *kapi.ResourceQuota {
-	return &kapi.ResourceQuota{
-		TypeMeta: unversioned.TypeMeta{
+func quota(name, namespace, memory, pods string) *corev1.ResourceQuota {
+	return &corev1.ResourceQuota{
+		TypeMeta: metav1.TypeMeta{
 			Kind: "resourcequotas",
 		},
-		ObjectMeta: kapi.ObjectMeta{
+		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: namespace,
 		},
-		Spec: kapi.ResourceQuotaSpec{
-			Hard: kapi.ResourceList(map[kapi.ResourceName]resource.Quantity{
-				kapi.ResourceMemory: resource.MustParse(memory),
-				kapi.ResourcePods:   resource.MustParse(pods),
+		Spec: corev1.ResourceQuotaSpec{
+			Hard: corev1.ResourceList(map[corev1.ResourceName]resource.Quantity{
+				corev1.ResourceMemory: resource.MustParse(memory),
+				corev1.ResourcePods:   resource.MustParse(pods),
 			}),
 		},
 	}
@@ -825,13 +866,12 @@ func podResource(uid, name, namespace, resourceVersion string, request resource.
 
 func rcResource(uid, name, namespace, resourceVersion, dc string, rt []*cache.RunningTime) *cache.ResourceObject {
 	return &cache.ResourceObject{
-		UID:              types.UID(uid),
-		Name:             name,
-		Namespace:        namespace,
-		Kind:             cache.RCKind,
-		ResourceVersion:  resourceVersion,
-		DeploymentConfig: dc,
-		RunningTimes:     rt,
+		UID:             types.UID(uid),
+		Name:            name,
+		Namespace:       namespace,
+		Kind:            cache.RCKind,
+		ResourceVersion: resourceVersion,
+		RunningTimes:    rt,
 	}
 }
 
